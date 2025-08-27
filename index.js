@@ -1,6 +1,5 @@
-// index.js - 优化版本
-// Stremio subtitle translate addon - 优化版本
-// 修复了配置获取、字幕处理、用户体验等问题
+// index.js - 终极修复版本
+// 修复了 Windows 客户端非标准 URL 格式问题
 
 import express from 'express';
 import axios from 'axios';
@@ -326,6 +325,16 @@ app.use(express.static('public'));
 
 console.log('🔄 Setting up routes...');
 
+// ！！！新增路由：处理Windows客户端的非标准URL格式！！！
+app.get('/subtitles/:type/:id/:filename', async (req, res) => {
+  const { type, id } = req.params;
+  // 重组为 SDK 识别的格式
+  const sdkId = `${type}/${id}`;
+  // 调用核心处理器
+  const response = await handleSubtitles({ id: sdkId });
+  res.json(response);
+});
+
 // 简单的根路径，用于快速测试
 app.get('/', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -379,11 +388,11 @@ app.use((err, req, res, next) => {
 });
 
 // Main subtitles handler
-builder.defineSubtitlesHandler(async ({ id, extra = {} }) => {
+const handleSubtitles = async ({ id, extra = {} }) => {
   console.log(`Subtitle request: ${id}, config:`, extra);
   
   try {
-    const [imdb_id, season, episode] = id.split(':');
+    const [type, imdb_id, season, episode] = id.split(/[:\/]/).filter(Boolean);
     if (!imdb_id) throw new Error('Invalid ID format');
     
     // Parse enabled languages from config
@@ -436,7 +445,7 @@ builder.defineSubtitlesHandler(async ({ id, extra = {} }) => {
       }
       
       // Start translation if not cached
-      if (!cached || cached.status === 'error') {
+      if (!cached || cached.status === 'error' || cached.progress < 100) {
         try {
           const englishContent = await searchAndCacheOpenSubtitles(imdb_id, season, episode, 'en');
           if (englishContent) {
@@ -465,7 +474,9 @@ builder.defineSubtitlesHandler(async ({ id, extra = {} }) => {
     console.error('Subtitle handler error:', error);
     return { subtitles: [] };
   }
-});
+};
+
+builder.defineSubtitlesHandler(handleSubtitles);
 
 // Routes
 app.get('/', (req, res) => {
