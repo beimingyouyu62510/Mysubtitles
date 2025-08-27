@@ -17,7 +17,6 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { addonBuilder } from 'stremio-addon-sdk';
 import crypto from 'crypto';
-import os from 'os';
 import fs from 'fs';
 import path from 'path';
 
@@ -314,20 +313,27 @@ const manifest = {
     { key: 'to', title: 'Target language (e.g. zh-CN)', type: 'text', default: DEFAULT_TO },
     { key: 'engine', title: 'Engine', type: 'text', default: ENGINE }
   ],
-  // 修复了 manifest.catalogs 错误
   catalogs: []
 };
+
 const builder = new addonBuilder(manifest);
-app.get('/manifest.json', (req, res) => res.json(builder.getInterface().manifest));
 
-// core translate route
-app.get('/translate', async (req, res) => {
+// 核心：使用 defineSubtitlesHandler 来处理字幕请求
+builder.defineSubtitlesHandler(async ({ id }) => {
   try {
-    const { imdb_id, season, episode, source } = req.query;
-    const to = (req.query.to || DEFAULT_TO);
-    const engine = (req.query.engine || ENGINE);
+    const [imdb_id, season, episode] = id.split(':');
+    
+    // 从 URL 参数中获取 source 参数
+    const urlParams = new URLSearchParams(id);
+    const source = urlParams.get('source');
 
-    if (!imdb_id && !source) return res.status(400).json({ error: 'missing imdb_id or source' });
+    // 确保正确地从 manifest.json 中获取配置
+    const to = manifest.config.find(c => c.key === 'to')?.default || DEFAULT_TO;
+    const engine = manifest.config.find(c => c.key === 'engine')?.default || ENGINE;
+
+    if (!imdb_id && !source) {
+      return Promise.reject(new Error('Missing imdb_id or source'));
+    }
 
     // build key for cache: imdb|season|episode|to|engine
     const keyBase = imdb_id ? `${imdb_id}|${season||''}|${episode||''}` : `source|${source}`;
@@ -336,29 +342,25 @@ app.get('/translate', async (req, res) => {
     // check cache
     const cached = await db.get('SELECT * FROM translation_cache WHERE key=?', cacheKey);
     if (cached && cached.status === 'done' && cached.srt) {
-      return res.setHeader('Content-Type','application/x-subrip; charset=utf-8').send(cached.srt);
+      return { subtitles: [{ id: 'translated', url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(cached.srt).toString('base64') }] };
     }
 
     // 1) if imdb_id: try to find target language subtitle first
     let subtitleUrl = null;
     let originalText = null;
     if (imdb_id) {
-      // try target language (simplify to first two-letter mapping)
-      const langTry = to.split('-')[0]; // zh-CN -> zh
+      const langTry = to.split('-')[0];
       try {
         subtitleUrl = await searchOpenSubtitles(imdb_id, season, episode, langTry);
       } catch (e) {
         console.warn('opensub target search error', e && e.message ? e.message : e);
       }
       if (subtitleUrl) {
-        // got target language subtitle -> return it directly (no translation)
         originalText = await downloadText(subtitleUrl);
-        // store into cache as done
         await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
           cacheKey, to, engine, hashStr(originalText), originalText, 'done', Date.now());
-        return res.setHeader('Content-Type','application/x-subrip; charset=utf-8').send(originalText);
+        return { subtitles: [{ id: 'direct-found', url: subtitleUrl }] };
       }
-      // else fallback to english
       try {
         subtitleUrl = await searchOpenSubtitles(imdb_id, season, episode, 'en');
       } catch (e) {
@@ -366,33 +368,28 @@ app.get('/translate', async (req, res) => {
         subtitleUrl = null;
       }
       if (!subtitleUrl) {
-        return res.status(404).json({ error: 'no subtitles found on OpenSubtitles' });
+        return { subtitles: [] }; // Return empty array if no subtitles found
       }
       originalText = await downloadText(subtitleUrl);
     } else {
-      // source provided direct
       originalText = await downloadText(source);
     }
 
-    // we now have originalText (likely english)
-    // if no cache, create placeholder and start translation job
-    // first write placeholder cache with status pending to avoid duplicate jobs
     await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
       cacheKey, to, engine, hashStr(originalText), '', 'pending', Date.now());
 
-    // start background job to translate full file
     const jobId = await submitTranslationJob(cacheKey, imdb_id, season, episode, originalText, to, engine);
 
-    // respond immediately with placeholder SRT that instructs user to reselect after ~30s
     const note = `Translating subtitles to ${to} (engine=${engine}). Job id=${jobId}. Please re-open subtitle list after ~20-60s to load completed translation.`;
     const placeholder = makePlaceholderSRT(note);
-    res.setHeader('Content-Type','application/x-subrip; charset=utf-8');
-    res.send(placeholder);
+
+    return { subtitles: [{ id: 'placeholder', url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(placeholder).toString('base64') }] };
 
   } catch (e) {
     console.error(e && e.message ? e.message : e);
-    res.status(500).json({ error: String(e && e.message ? e.message : e) });
+    return Promise.reject(new Error(String(e && e.message ? e.message : e)));
   }
 });
 
+app.get('/manifest.json', (req, res) => res.json(builder.getInterface().manifest));
 app.listen(PORT, () => console.log(`Subtitle translate addon running at ${BASE_URL}:${PORT}`));
