@@ -313,7 +313,9 @@ const manifest = {
   config: [
     { key: 'to', title: 'Target language (e.g. zh-CN)', type: 'text', default: DEFAULT_TO },
     { key: 'engine', title: 'Engine', type: 'text', default: ENGINE }
-  ]
+  ],
+  // 修复了 manifest.catalogs 错误
+  catalogs: []
 };
 const builder = new addonBuilder(manifest);
 app.get('/manifest.json', (req, res) => res.json(builder.getInterface().manifest));
