@@ -558,9 +558,11 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   // 测试健康检查
   setTimeout(async () => {
     try {
-      const axios = require('axios');
-      const response = await axios.get(`http://localhost:${PORT}/health`, { timeout: 5000 });
-      console.log('✅ Self health check passed:', response.data);
+      import('axios').then(async (axiosModule) => {
+        const axios = axiosModule.default;
+        const response = await axios.get(`http://localhost:${PORT}/health`, { timeout: 5000 });
+        console.log('✅ Self health check passed:', response.data);
+      });
     } catch (error) {
       console.error('❌ Self health check failed:', error.message);
     }
