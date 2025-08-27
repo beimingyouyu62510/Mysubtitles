@@ -555,18 +555,22 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📊 Railway PORT env: ${process.env.PORT}`);
   console.log(`🌍 Railway URL env: ${process.env.RAILWAY_STATIC_URL}`);
   
-  // 测试健康检查
+  // 延迟自检，避免启动期间干扰
   setTimeout(async () => {
     try {
       import('axios').then(async (axiosModule) => {
         const axios = axiosModule.default;
         const response = await axios.get(`http://localhost:${PORT}/health`, { timeout: 5000 });
-        console.log('✅ Self health check passed:', response.data);
+        console.log('✅ Self health check passed');
+        // 在非生产环境显示详细信息
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('Health details:', response.data);
+        }
       });
     } catch (error) {
       console.error('❌ Self health check failed:', error.message);
     }
-  }, 2000);
+  }, 5000); // 延长到5秒后执行
 });
 
 server.on('error', (error) => {
@@ -574,10 +578,12 @@ server.on('error', (error) => {
   process.exit(1);
 });
 
-// Keep process alive
+// 移除频繁的 keepalive，改为较长间隔
 setInterval(() => {
-  console.log('💓 Keepalive ping');
-}, 30000);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('💓 Service running normally');
+  }
+}, 60000); // 改为每分钟一次，且只在非生产环境显示
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
