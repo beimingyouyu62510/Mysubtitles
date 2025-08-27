@@ -5,8 +5,9 @@ builder = "DOCKERFILE"
 startCommand = "npm start"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+# Railway 会检查应用是否在分配的端口上响应
+# healthcheckPath = "/health"
+# healthcheckTimeout = 30
 
 [env]
 NODE_ENV = "production"
