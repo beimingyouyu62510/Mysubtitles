@@ -11,8 +11,8 @@
     "axios": "^1.6.8",
     "bottleneck": "^2.19.5",
     "express": "^4.18.2",
-    "sqlite": "^5.1.6",
-    "sqlite3": "^5.1.6",
+    "sqlite": "^5.0.0",
+    "sqlite3": "^5.0.0",
     "stremio-addon-sdk": "^1.6.6"
   }
 }
