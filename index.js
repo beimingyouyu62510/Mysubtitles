@@ -310,19 +310,19 @@ app.get('/status/:jobId', async (req, res) => {
 
 // manifest for Stremio
 const manifest = {
-  id: 'org.custom.subtranslate.opensub',
-  version: '1.0.0',
-  name: 'Subtitle Translate (OpenSubtitles priority)',
-  description: 'Search OpenSubtitles for target language first; if missing, translate English subtitles and cache.',
-  resources: ['subtitles'],
-  types: ['movie','series'],
-  idPrefixes: ['tt'],
-  behaviorHints: { configurable: true, configurationRequired: false },
-  config: [
-    { key: 'to', title: 'Target language (e.g. zh-CN)', type: 'text', default: DEFAULT_TO },
-    { key: 'engine', title: 'Engine', type: 'text', default: ENGINE }
+  "id": "org.custom.subtranslate.opensub",
+  "version": "1.0.0",
+  "name": "Subtitle Translate (OpenSubtitles priority)",
+  "description": "Search OpenSubtitles for target language first; if missing, translate English subtitles and cache.",
+  "resources": ["subtitles"],
+  "types": ["movie","series","tv","channel"],
+  "idPrefixes": [],
+  "behaviorHints": { "configurable": true, "configurationRequired": false },
+  "config": [
+    { "key": "to", "title": "Target language (e.g. zh-CN)", "type": "text", "default": "zh-CN" },
+    { "key": "engine", "title": "Engine", "type": "text", "default": "google_free" }
   ],
-  catalogs: []
+  "catalogs": []
 };
 
 const builder = new addonBuilder(manifest);
