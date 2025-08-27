@@ -107,13 +107,17 @@ function makePlaceholderSRT(note, lang = 'en') {
 
 // OpenSubtitles search (prefer given language)
 async function searchOpenSubtitles(imdb_id, season, episode, lang = 'en') {
+  console.log(`Log: Searching OpenSubtitles for lang=${lang}, imdb_id=${imdb_id}`); // Log: Search start
   if (!OPENSUBTITLES_API_KEY) throw new Error('OPENSUBTITLES_API_KEY not configured');
   const key = `${imdb_id}|${season||''}|${episode||''}|${lang}`;
   // cache 6h
   const cached = await db.get('SELECT subtitle_url,fetched_at FROM opensub_cache WHERE key=?', key);
-  if (cached && (Date.now() - cached.fetched_at) < 1000 * 60 * 60 * 6) return cached.subtitle_url;
+  if (cached && (Date.now() - cached.fetched_at) < 1000 * 60 * 60 * 6) {
+    console.log(`Log: Found cached OpenSubtitles URL for key: ${key}`); // Log: Cache hit
+    return cached.subtitle_url;
+  }
   const url = 'https://api.opensubtitles.com/api/v1/subtitles';
-  const params = { imdb_id: imdb_id.replace(/^tt/,'') ? imdb_id : imdb_id, languages: lang };
+  const params = { imdb_id, languages: lang };
   if (season) params.season_number = season;
   if (episode) params.episode_number = episode;
   params.order_by = 'downloads'; params.sort = 'desc';
@@ -123,8 +127,10 @@ async function searchOpenSubtitles(imdb_id, season, episode, lang = 'en') {
     timeout: 15000,
   }));
   const items = (res.data && res.data.data) || [];
-  if (!items.length) return null;
-  // pick first with files
+  if (!items.length) {
+    console.log(`Log: No subtitles found on OpenSubtitles for lang=${lang}`); // Log: No subtitles found
+    return null;
+  }
   let chosen = null;
   for (const it of items) {
     if (it.attributes && Array.isArray(it.attributes.files) && it.attributes.files.length) {
@@ -132,7 +138,10 @@ async function searchOpenSubtitles(imdb_id, season, episode, lang = 'en') {
       break;
     }
   }
-  if (!chosen) return null;
+  if (!chosen) {
+    console.log(`Log: No suitable files found for subtitles on OpenSubtitles`); // Log: No suitable files
+    return null;
+  }
   const file = chosen.attributes.files[0];
   const file_id = file.file_id;
   const dlRes = await limiter.schedule(() => axios.post('https://api.opensubtitles.com/api/v1/download', { file_id }, {
@@ -140,13 +149,19 @@ async function searchOpenSubtitles(imdb_id, season, episode, lang = 'en') {
     timeout: 15000,
   }));
   const link = dlRes.data && (dlRes.data.link || (dlRes.data.data && dlRes.data.data.link));
-  if (!link) return null;
+  if (!link) {
+    console.log(`Log: Failed to get download link from OpenSubtitles`); // Log: No download link
+    return null;
+  }
   await db.run('INSERT OR REPLACE INTO opensub_cache(key,subtitle_url,fetched_at) VALUES(?,?,?)', key, link, Date.now());
+  console.log(`Log: Found and cached OpenSubtitles URL: ${link}`); // Log: Found URL
   return link;
 }
 
 async function downloadText(url) {
+  console.log(`Log: Downloading subtitle content from URL`); // Log: Download start
   const res = await limiter.schedule(() => axios.get(url, { responseType: 'text', timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } }));
+  console.log(`Log: Download successful`); // Log: Download success
   return res.data;
 }
 
@@ -174,10 +189,9 @@ async function googleCloudTranslate(arrayTexts, to) {
 async function deepLTranslate(arrayTexts, to) {
   if (!DEEPL_API_KEY) throw new Error('DEEPL_API_KEY not configured');
   const url = `https://api-free.deepl.com/v2/translate`; // free account endpoint; enterprise may differ
-  // DeepL supports multiple text params 'text=...' in form-urlencoded
   const form = new URLSearchParams();
   for (const t of arrayTexts) form.append('text', t);
-  form.append('target_lang', to.replace('-','').slice(0,2).toUpperCase()); // rough mapping zh-CN -> ZH etc
+  form.append('target_lang', to.replace('-','').slice(0,2).toUpperCase());
   const res = await limiter.schedule(() => axios.post(url, form.toString(), {
     headers: { 'Authorization': `DeepL-Auth-Key ${DEEPL_API_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     timeout: 20000,
@@ -188,12 +202,8 @@ async function deepLTranslate(arrayTexts, to) {
 
 // batch-translate utility (chunks & cache)
 async function batchTranslateSentences(sentences, to, engine) {
-  // sentences: array of strings
-  // engine: google_free | google_cloud | deepl
-  // returns array of translated strings same length (best effort)
+  console.log(`Log: Starting batch translation with engine ${engine} to ${to}`); // Log: Translation start
   const results = new Array(sentences.length).fill('');
-  // simple per-job cache key per sentence could be added; for simplicity we cache final SRT only
-  // chunk into batches by maxChars
   const maxChars = 4000;
   let batch = [], idxBatch = [], len = 0;
   async function flush() {
@@ -203,12 +213,9 @@ async function batchTranslateSentences(sentences, to, engine) {
       if (engine === 'google_cloud') outArr = await googleCloudTranslate(batch, to);
       else if (engine === 'deepl') outArr = await deepLTranslate(batch, to);
       else {
-        // google_free: join with \n and split heuristically
         const joined = await googleFreeTranslate(batch.join('\n'), to);
-        // try split by newline
         outArr = joined.split('\n');
         if (outArr.length !== batch.length) {
-          // fallback: try to split proportionally
           const avg = Math.max(1, Math.floor(joined.length / batch.length));
           outArr = [];
           let p = 0;
@@ -217,7 +224,6 @@ async function batchTranslateSentences(sentences, to, engine) {
             outArr.push(part);
             p += avg;
           }
-          // ensure lengths match
           if (outArr.length < batch.length) {
             while (outArr.length < batch.length) outArr.push('');
           } else if (outArr.length > batch.length) outArr = outArr.slice(0, batch.length);
@@ -226,8 +232,8 @@ async function batchTranslateSentences(sentences, to, engine) {
       for (let i = 0; i < idxBatch.length; i++) {
         results[idxBatch[i]] = outArr[i] || '';
       }
+      console.log(`Log: Completed a batch of ${batch.length} sentences`); // Log: Batch completion
     } catch (e) {
-      // on translate error, leave blanks
       console.error('batch translate error', e && e.message ? e.message : e);
     }
     batch = []; idxBatch = []; len = 0;
@@ -248,6 +254,7 @@ async function batchTranslateSentences(sentences, to, engine) {
 
 // job submit / do
 async function submitTranslationJob(key, imdb_id, season, episode, subtitleText, to, engine) {
+  console.log(`Log: Submitting new translation job for key: ${key}`); // Log: Job submission
   const jobId = hashStr(key + Date.now());
   await db.run('INSERT OR REPLACE INTO jobs(id,key,status,updated_at) VALUES(?,?,?,?)', jobId, key, 'pending', Date.now());
   // do async but not await here
@@ -264,11 +271,13 @@ async function submitTranslationJob(key, imdb_id, season, episode, subtitleText,
       await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
         key, to, engine, hashStr(subtitleText), finalSrt, 'done', Date.now());
       await db.run('UPDATE jobs SET status=?,message=?,updated_at=? WHERE id=?', 'done', 'completed', Date.now(), jobId);
+      console.log(`Log: Job ${jobId} completed successfully.`); // Log: Job success
     } catch (e) {
       console.error('job failed', e && e.message ? e.message : e);
       await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
         key, to, engine, '', '', 'error', Date.now());
       await db.run('UPDATE jobs SET status=?,message=?,updated_at=? WHERE id=?', 'error', String(e && e.message ? e.message : e), Date.now(), jobId);
+      console.error(`Log: Job ${jobId} failed.`); // Log: Job failure
     }
   })();
   return jobId;
@@ -320,6 +329,7 @@ const builder = new addonBuilder(manifest);
 
 // 核心：使用 defineSubtitlesHandler 来处理字幕请求
 builder.defineSubtitlesHandler(async ({ id }) => {
+  console.log(`Log: Received subtitles request for ID: ${id}`); // Log: Request start
   try {
     const [imdb_id, season, episode] = id.split(':');
     
@@ -330,11 +340,8 @@ builder.defineSubtitlesHandler(async ({ id }) => {
     // 确保正确地从 manifest.json 中获取配置
     const to = manifest.config.find(c => c.key === 'to')?.default || DEFAULT_TO;
     const engine = manifest.config.find(c => c.key === 'engine')?.default || ENGINE;
-
-    if (!imdb_id && !source) {
-      return Promise.reject(new Error('Missing imdb_id or source'));
-    }
-
+    console.log(`Log: Using target language: ${to}, engine: ${engine}`); // Log: Config
+    
     // build key for cache: imdb|season|episode|to|engine
     const keyBase = imdb_id ? `${imdb_id}|${season||''}|${episode||''}` : `source|${source}`;
     const cacheKey = `${keyBase}|${to}|${engine}`;
@@ -342,6 +349,7 @@ builder.defineSubtitlesHandler(async ({ id }) => {
     // check cache
     const cached = await db.get('SELECT * FROM translation_cache WHERE key=?', cacheKey);
     if (cached && cached.status === 'done' && cached.srt) {
+      console.log(`Log: Cache hit for key: ${cacheKey}. Returning cached translation.`); // Log: Cache hit
       return { subtitles: [{ id: 'translated', url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(cached.srt).toString('base64') }] };
     }
 
@@ -356,11 +364,13 @@ builder.defineSubtitlesHandler(async ({ id }) => {
         console.warn('opensub target search error', e && e.message ? e.message : e);
       }
       if (subtitleUrl) {
+        console.log(`Log: Found target language subtitle for ${id}.`); // Log: Target lang found
         originalText = await downloadText(subtitleUrl);
         await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
           cacheKey, to, engine, hashStr(originalText), originalText, 'done', Date.now());
         return { subtitles: [{ id: 'direct-found', url: subtitleUrl }] };
       }
+      console.log(`Log: No target language subtitle found. Falling back to English.`); // Log: Fallback
       try {
         subtitleUrl = await searchOpenSubtitles(imdb_id, season, episode, 'en');
       } catch (e) {
@@ -368,13 +378,16 @@ builder.defineSubtitlesHandler(async ({ id }) => {
         subtitleUrl = null;
       }
       if (!subtitleUrl) {
+        console.log(`Log: No English subtitles found for ${id}.`); // Log: No subtitles
         return { subtitles: [] }; // Return empty array if no subtitles found
       }
       originalText = await downloadText(subtitleUrl);
     } else {
+      console.log(`Log: Source URL provided: ${source}.`); // Log: Source URL
       originalText = await downloadText(source);
     }
 
+    console.log(`Log: Submitting translation job and returning placeholder for ${id}.`); // Log: Job submit
     await db.run('INSERT OR REPLACE INTO translation_cache(key,to_lang,engine,source_hash,srt,status,created_at) VALUES(?,?,?,?,?,?,?)',
       cacheKey, to, engine, hashStr(originalText), '', 'pending', Date.now());
 
@@ -386,7 +399,7 @@ builder.defineSubtitlesHandler(async ({ id }) => {
     return { subtitles: [{ id: 'placeholder', url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(placeholder).toString('base64') }] };
 
   } catch (e) {
-    console.error(e && e.message ? e.message : e);
+    console.error(`Log: Error processing subtitles request for ID ${id}:`, e); // Log: Request error
     return Promise.reject(new Error(String(e && e.message ? e.message : e)));
   }
 });
