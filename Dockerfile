@@ -1,11 +1,12 @@
 FROM node:20-alpine
 
-# 安装必要的系统依赖
+# 安装必要的系统依赖（包含 curl 用于健康检查）
 RUN apk add --no-cache \
     sqlite \
     python3 \
     make \
-    g++
+    g++ \
+    curl
 
 # 设置工作目录
 WORKDIR /usr/src/app
@@ -29,26 +30,9 @@ USER node
 # 暴露端口
 EXPOSE 3000
 
-# 健康检查
+# 使用 curl 进行健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "
-    const http = require('http');
-    const options = {
-      host: '0.0.0.0',
-      port: process.env.PORT || 3000,
-      path: '/health',
-      timeout: 2000
-    };
-    const req = http.request(options, (res) => {
-      if (res.statusCode === 200) {
-        process.exit(0);
-      } else {
-        process.exit(1);
-      }
-    });
-    req.on('error', () => process.exit(1));
-    req.end();
-  "
+  CMD curl -f http://localhost:${PORT:-3000}/health || exit 1
 
 # 启动命令
 CMD ["npm", "start"]
