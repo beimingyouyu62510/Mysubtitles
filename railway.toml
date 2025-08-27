@@ -3,15 +3,19 @@ builder = "DOCKERFILE"
 
 [deploy]
 startCommand = "npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+healthcheckPath = "/health"
+healthcheckTimeout = 30
 
 [env]
-PORT = "3000"
-BASE_URL = "https://your-app.up.railway.app"
+NODE_ENV = "production"
 ENGINE = "google_free"
-DEFAULT_TO = "zh-CN"
-# OPENSUBTITLES_API_KEY = "xxx"
-# GOOGLE_API_KEY = "xxx"
-# DEEPL_API_KEY = "xxx"
+DEFAULT_TO_LANGS = "zh-CN,ja,ko,es,fr"
+# 以下变量需要在 Railway 面板中设置
+# OPENSUBTITLES_API_KEY = "your_key_here"
+# GOOGLE_API_KEY = "your_key_here"  
+# DEEPL_API_KEY = "your_key_here"
 
 [[volumes]]
 name = "subtitle-cache"
