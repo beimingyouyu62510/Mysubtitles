@@ -311,13 +311,41 @@ async function progressiveTranslate(cacheKey, subtitleContent, toLang, engine) {
   }
 }
 
-// Initialize
-await initDB();
+// Initialize with error handling
+console.log('🔄 Initializing database...');
+await initDB().catch(err => {
+  console.error('❌ Database initialization failed:', err);
+  process.exit(1);
+});
+console.log('✅ Database initialized successfully');
 
 // Express app
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
+
+console.log('🔄 Setting up routes...');
+
+// 简单的根路径，用于快速测试
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`
+    <h2>🎬 AI Subtitle Translator v2.0</h2>
+    <p><strong>✅ Server is running!</strong></p>
+    <p><strong>Port:</strong> ${PORT}</p>
+    <p><strong>Host:</strong> 0.0.0.0</p>
+    <p><strong>Manifest URL:</strong> <a href="/manifest.json">${BASE_URL}/manifest.json</a></p>
+    <p><strong>Health Check:</strong> <a href="/health">/health</a></p>
+    <p><strong>Features:</strong></p>
+    <ul>
+      <li>✅ OpenSubtitles native language priority</li>
+      <li>✅ Smart caching system</li>
+      <li>✅ Multi-language support: ${DEFAULT_TO_LANGS.join(', ')}</li>
+      <li>✅ Progressive translation</li>
+    </ul>
+    <p><strong>Status:</strong> <a href="/status">View cache status</a></p>
+  `);
+});
 
 // Manifest with configurable languages
 const buildManifest = () => ({
@@ -342,6 +370,13 @@ const buildManifest = () => ({
 });
 
 const builder = new addonBuilder(buildManifest());
+console.log('✅ Addon builder initialized');
+
+// Add error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Express error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 // Main subtitles handler
 builder.defineSubtitlesHandler(async ({ id, extra = {} }) => {
@@ -477,10 +512,12 @@ app.get('/status', async (req, res) => {
 // Health check with detailed info
 app.get('/health', async (req, res) => {
   try {
+    console.log('Health check requested');
+    
     // Test database connection
     await db.get('SELECT 1');
     
-    res.json({ 
+    const health = { 
       status: 'ok', 
       version: '2.0.0',
       timestamp: Date.now(),
@@ -489,9 +526,14 @@ app.get('/health', async (req, res) => {
       database: 'connected',
       opensubtitles_configured: !!OPENSUBTITLES_API_KEY,
       google_configured: !!GOOGLE_API_KEY,
-      deepl_configured: !!DEEPL_API_KEY
-    });
+      deepl_configured: !!DEEPL_API_KEY,
+      environment: process.env.NODE_ENV || 'development'
+    };
+    
+    console.log('Health check passed:', health);
+    res.json(health);
   } catch (error) {
+    console.error('Health check failed:', error);
     res.status(500).json({ 
       status: 'error', 
       error: error.message,
@@ -500,13 +542,40 @@ app.get('/health', async (req, res) => {
   }
 });
 
+console.log('✅ Routes configured');
+
 // Start server with Railway compatibility
+console.log('🔄 Starting server...');
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Subtitle Translator v2.0 running on port ${PORT}`);
   console.log(`📋 Manifest: ${BASE_URL}/manifest.json`);
   console.log(`🔧 Supported languages: ${DEFAULT_TO_LANGS.join(', ')}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 Server bound to: 0.0.0.0:${PORT}`);
+  console.log(`📊 Railway PORT env: ${process.env.PORT}`);
+  console.log(`🌍 Railway URL env: ${process.env.RAILWAY_STATIC_URL}`);
+  
+  // 测试健康检查
+  setTimeout(async () => {
+    try {
+      const axios = require('axios');
+      const response = await axios.get(`http://localhost:${PORT}/health`, { timeout: 5000 });
+      console.log('✅ Self health check passed:', response.data);
+    } catch (error) {
+      console.error('❌ Self health check failed:', error.message);
+    }
+  }, 2000);
 });
+
+server.on('error', (error) => {
+  console.error('❌ Server error:', error);
+  process.exit(1);
+});
+
+// Keep process alive
+setInterval(() => {
+  console.log('💓 Keepalive ping');
+}, 30000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
