@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const BASE_URL = process.env.BASE_URL || process.env.RAILWAY_STATIC_URL || `http://localhost:${PORT}`;
 const OPENSUBTITLES_API_KEY = process.env.OPENSUBTITLES_API_KEY || '';
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 const DEEPL_API_KEY = process.env.DEEPL_API_KEY || '';
@@ -474,18 +474,52 @@ app.get('/status', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    version: '2.0.0',
-    timestamp: Date.now()
-  });
+// Health check with detailed info
+app.get('/health', async (req, res) => {
+  try {
+    // Test database connection
+    await db.get('SELECT 1');
+    
+    res.json({ 
+      status: 'ok', 
+      version: '2.0.0',
+      timestamp: Date.now(),
+      port: PORT,
+      base_url: BASE_URL,
+      database: 'connected',
+      opensubtitles_configured: !!OPENSUBTITLES_API_KEY,
+      google_configured: !!GOOGLE_API_KEY,
+      deepl_configured: !!DEEPL_API_KEY
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      error: error.message,
+      timestamp: Date.now()
+    });
+  }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Subtitle Translator v2.0 running on ${BASE_URL}`);
+// Start server with Railway compatibility
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Subtitle Translator v2.0 running on port ${PORT}`);
   console.log(`📋 Manifest: ${BASE_URL}/manifest.json`);
   console.log(`🔧 Supported languages: ${DEFAULT_TO_LANGS.join(', ')}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    if (db) {
+      db.close().then(() => {
+        console.log('Database closed');
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+  });
 });
