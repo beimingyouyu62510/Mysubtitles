@@ -3,6 +3,9 @@ name: Generate package-lock.json
 on:
   workflow_dispatch:   # 手动运行
 
+permissions:
+  contents: write    # 授予写入权限
+
 jobs:
   build:
     runs-on: ubuntu-latest
