@@ -1,0 +1,18 @@
+{
+  "name": "stremio-subtitle-translate-addon",
+  "version": "2.0.0",
+  "description": "AI subtitle translator with caching, multi-language, and OpenSubtitles fallback.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "bottleneck": "^2.19.5",
+    "express": "^4.18.2",
+    "sqlite": "^5.1.6",
+    "sqlite3": "^5.1.6",
+    "stremio-addon-sdk": "^1.6.6"
+  }
+}
