@@ -1,5 +1,5 @@
-// index.js - 最终解决方案
-// 彻底移除 OpenSubtitles 依赖，使用公共字幕源，确保服务稳定。
+// index.js - 终极修复版本
+// 彻底移除 OpenSubtitles 依赖，使用Stremio自带的字幕源，确保服务稳定。
 
 import express from 'express';
 import axios from 'axios';
@@ -13,7 +13,6 @@ import path from 'path';
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || process.env.RAILWAY_STATIC_URL || `http://localhost:${PORT}`;
-const OPENSUBTITLES_API_KEY = process.env.OPENSUBTITLES_API_KEY || '';
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 const DEEPL_API_KEY = process.env.DEEPL_API_KEY || '';
 const ENGINE = process.env.ENGINE || 'google_free';
@@ -32,22 +31,15 @@ async function initDB() {
   db = await open({ filename: DB_PATH, driver: sqlite3.Database });
   await db.exec(`
     PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS opensub_cache (
-      key TEXT PRIMARY KEY,
-      subtitle_content TEXT,
-      fetched_at INTEGER
-    );
     CREATE TABLE IF NOT EXISTS translation_cache (
       key TEXT PRIMARY KEY,
       to_lang TEXT,
       engine TEXT,
       source_hash TEXT,
       srt_content TEXT,
-      status TEXT, -- pending|done|error
-      progress INTEGER DEFAULT 0,
+      status TEXT,
       created_at INTEGER
     );
-    CREATE INDEX IF NOT EXISTS idx_translation_status ON translation_cache(status, created_at);
   `);
 }
 
@@ -92,102 +84,6 @@ function buildSRT(blocks) {
   }).join('\n');
 }
 
-// OpenSubtitles search with content caching
-async function searchAndCacheOpenSubtitles(imdb_id, season, episode, lang = 'en') {
-  console.log(`Searching OpenSubtitles: ${imdb_id}, S${season}E${episode}, lang=${lang}`);
-  
-  if (!OPENSUBTITLES_API_KEY) {
-    throw new Error('OPENSUBTITLES_API_KEY not configured');
-  }
-
-  const key = `${imdb_id}|${season||''}|${episode||''}|${lang}`;
-  
-  // Check cache (24h validity)
-  const cached = await db.get('SELECT subtitle_content, fetched_at FROM opensub_cache WHERE key=?', key);
-  if (cached && (Date.now() - cached.fetched_at) < 1000 * 60 * 60 * 24) {
-    console.log(`Cache hit for OpenSubtitles: ${key}`);
-    return cached.subtitle_content;
-  }
-
-  // Search subtitles
-  const searchUrl = 'https://api.opensubtitles.com/api/v1/subtitles';
-  const params = { 
-    imdb_id, 
-    languages: lang,
-    order_by: 'downloads',
-    sort: 'desc'
-  };
-  if (season) params.season_number = season;
-  if (episode) params.episode_number = episode;
-
-  const searchRes = await limiter.schedule(() => axios.get(searchUrl, {
-    params,
-    headers: { 
-      'Api-Key': OPENSUBTITLES_API_KEY, 
-      'Accept': 'application/json',
-      'User-Agent': 'Stremio Subtitle Addon v2.0'
-    },
-    timeout: 15000,
-  }));
-
-  const items = (searchRes.data?.data) || [];
-  if (!items.length) {
-    console.log(`No subtitles found for ${lang}`);
-    return null;
-  }
-
-  // Find suitable file
-  let chosen = null;
-  for (const item of items) {
-    if (item.attributes?.files?.length) {
-      chosen = item;
-      break;
-    }
-  }
-
-  if (!chosen) {
-    console.log(`No suitable files found`);
-    return null;
-  }
-
-  // Download subtitle
-  const file_id = chosen.attributes.files[0].file_id;
-  const downloadRes = await limiter.schedule(() => axios.post(
-    'https://api.opensubtitles.com/api/v1/download', 
-    { file_id }, 
-    {
-      headers: { 
-        'Api-Key': OPENSUBTITLES_API_KEY, 
-        'Content-Type': 'application/json',
-        'User-Agent': 'Stremio Subtitle Addon v2.0'
-      },
-      timeout: 15000,
-    }
-  ));
-
-  const downloadLink = downloadRes.data?.link;
-  if (!downloadLink) {
-    throw new Error('Failed to get download link');
-  }
-
-  // Fetch subtitle content
-  const contentRes = await limiter.schedule(() => axios.get(downloadLink, {
-    responseType: 'text',
-    timeout: 30000,
-    headers: { 'User-Agent': 'Mozilla/5.0' }
-  }));
-
-  const content = contentRes.data;
-  
-  // Cache content
-  await db.run('INSERT OR REPLACE INTO opensub_cache(key, subtitle_content, fetched_at) VALUES(?,?,?)', 
-    key, content, Date.now());
-  
-  console.log(`Successfully fetched and cached subtitles for ${key}`);
-  return content;
-}
-
-// Translation engines
 async function translateTexts(texts, toLang, engine) {
   if (!texts.length) return [];
   
@@ -208,7 +104,6 @@ async function translateTexts(texts, toLang, engine) {
 
 async function googleFreeTranslate(texts, to) {
   const results = [];
-  // Process in chunks to avoid rate limits
   const chunkSize = 10;
   for (let i = 0; i < texts.length; i += chunkSize) {
     const chunk = texts.slice(i, i + chunkSize);
@@ -222,7 +117,6 @@ async function googleFreeTranslate(texts, to) {
     const translated = res.data?.[0]?.map(x => x?.[0]).join('') || '';
     const splits = translated.split('\n---SPLIT---\n');
     
-    // Pad with originals if translation incomplete
     for (let j = 0; j < chunk.length; j++) {
       results.push(splits[j] || chunk[j] || '');
     }
@@ -267,25 +161,20 @@ async function deepLTranslate(texts, to) {
   return (res.data?.translations || []).map(t => t.text || '');
 }
 
-// Progressive translation with status updates
 async function progressiveTranslate(cacheKey, subtitleContent, toLang, engine) {
-  console.log(`Starting progressive translation: ${cacheKey}`);
-  
   try {
     const blocks = parseSRT(subtitleContent);
     const sourceHash = hashStr(subtitleContent);
     
-    // Initialize translation record
     await db.run(`INSERT OR REPLACE INTO translation_cache
-      (key, to_lang, engine, source_hash, srt_content, status, progress, created_at) 
-      VALUES (?,?,?,?,?,?,?,?)`,
-      cacheKey, toLang, engine, sourceHash, '', 'pending', 0, Date.now()
+      (key, to_lang, engine, source_hash, srt_content, status, created_at) 
+      VALUES (?,?,?,?,?,?,?)`,
+      cacheKey, toLang, engine, sourceHash, '', 'pending', Date.now()
     );
     
     const texts = blocks.map(b => b.text);
     const translatedTexts = await translateTexts(texts, toLang, engine);
     
-    // Build final SRT
     const translatedBlocks = blocks.map((block, i) => ({
       ...block,
       text: translatedTexts[i] || block.text
@@ -293,24 +182,20 @@ async function progressiveTranslate(cacheKey, subtitleContent, toLang, engine) {
     
     const finalSrt = buildSRT(translatedBlocks);
     
-    // Save completed translation
     await db.run(`UPDATE translation_cache 
-      SET srt_content=?, status='done', progress=100 
+      SET srt_content=?, status='done' 
       WHERE key=?`, finalSrt, cacheKey);
     
-    console.log(`Translation completed: ${cacheKey}`);
     return finalSrt;
-    
   } catch (error) {
     console.error(`Translation failed: ${cacheKey}`, error);
     await db.run(`UPDATE translation_cache 
-      SET status='error', progress=0 
+      SET status='error'
       WHERE key=?`, cacheKey);
     throw error;
   }
 }
 
-// Initialize with error handling
 console.log('🔄 Initializing database...');
 await initDB().catch(err => {
   console.error('❌ Database initialization failed:', err);
@@ -318,84 +203,26 @@ await initDB().catch(err => {
 });
 console.log('✅ Database initialized successfully');
 
-// Express app
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
 console.log('🔄 Setting up routes...');
 
-// ！！！新增路由：处理Windows客户端的非标准URL格式！！！
 app.get('/subtitles/:type/:id/:filename', async (req, res) => {
   const { type, id } = req.params;
-  // 重组为 SDK 识别的格式
   const sdkId = `${type}/${id}`;
-  // 调用核心处理器
   const response = await handleSubtitles({ id: sdkId });
   res.json(response);
 });
 
-// 简单的根路径，用于快速测试
-app.get('/', (req, res) => {
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`
-    <h2>🎬 AI Subtitle Translator v2.0</h2>
-    <p><strong>✅ Server is running!</strong></p>
-    <p><strong>Port:</strong> ${PORT}</p>
-    <p><strong>Host:</strong> 0.0.0.0</p>
-    <p><strong>Manifest URL:</strong> <a href="/manifest.json">${BASE_URL}/manifest.json</a></p>
-    <p><strong>Health Check:</strong> <a href="/health">/health</a></p>
-    <p><strong>Features:</strong></p>
-    <ul>
-      <li>✅ OpenSubtitles native language priority</li>
-      <li>✅ Smart caching system</li>
-      <li>✅ Multi-language support: ${DEFAULT_TO_LANGS.join(', ')}</li>
-      <li>✅ Progressive translation</li>
-    </ul>
-    <p><strong>Status:</strong> <a href="/status">View cache status</a></p>
-  `);
-});
-
-// Manifest with configurable languages
-const buildManifest = () => ({
-  "id": "org.custom.subtranslate.v2",
-  "version": "2.0.0",
-  "name": "AI Subtitle Translator",
-  "description": "Smart subtitle translation with OpenSubtitles priority and caching",
-  "resources": ["subtitles"],
-  "types": ["movie", "series"],
-  "idPrefixes": ["tt"],
-  "behaviorHints": { 
-    "configurable": true, 
-    "configurationRequired": false 
-  },
-  "config": DEFAULT_TO_LANGS.map(lang => ({
-    "key": `translate_${lang}`,
-    "type": "boolean",
-    "title": `Translate to ${lang}`,
-    "default": lang === DEFAULT_TO_LANGS[0]
-  })),
-  "catalogs": []
-});
-
-const builder = new addonBuilder(buildManifest());
-console.log('✅ Addon builder initialized');
-
-// Add error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Express error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// Main subtitles handler
-const handleSubtitles = async ({ id, extra = {} }) => {
+const handleSubtitles = async ({ id, extra = {}, subtitles: stremioSubtitles = [] }) => {
   console.log(`Subtitle request: ${id}, config:`, extra);
   
   try {
     const [type, imdb_id, season, episode] = id.split(/[:\/]/).filter(Boolean);
     if (!imdb_id) throw new Error('Invalid ID format');
     
-    // Parse enabled languages from config
     const enabledLangs = DEFAULT_TO_LANGS.filter(lang => 
       extra[`translate_${lang}`] !== false
     );
@@ -406,66 +233,40 @@ const handleSubtitles = async ({ id, extra = {} }) => {
     
     const subtitles = [];
     
-    // For each enabled language
-    for (const toLang of enabledLangs) {
-      const cacheKey = `${imdb_id}|${season||''}|${episode||''}|${toLang}|${ENGINE}`;
+    // 从Stremio自带的字幕列表中寻找英文字幕
+    const englishSub = stremioSubtitles.find(sub => sub.lang.toLowerCase() === 'en');
+    
+    if (englishSub && englishSub.url) {
+      const englishContentRes = await axios.get(englishSub.url, { responseType: 'text', timeout: 30000 });
+      const englishContent = englishContentRes.data;
       
-      // Check translation cache
-      const cached = await db.get(`SELECT * FROM translation_cache WHERE key=?`, cacheKey);
-      
-      if (cached?.status === 'done' && cached.srt_content) {
-        // Return cached translation
-        const dataUri = 'data:text/plain;charset=utf-8;base64,' + 
-          Buffer.from(cached.srt_content).toString('base64');
-        subtitles.push({
-          id: `translated-${toLang}`,
-          lang: toLang,
-          url: dataUri
-        });
-        continue;
-      }
-      
-      // Try to find native subtitle first
-      try {
-        const targetLang = toLang.split('-')[0];
-        const nativeContent = await searchAndCacheOpenSubtitles(imdb_id, season, episode, targetLang);
+      for (const toLang of enabledLangs) {
+        const cacheKey = `${imdb_id}|${season||''}|${episode||''}|${toLang}|${ENGINE}`;
+        const cached = await db.get(`SELECT * FROM translation_cache WHERE key=?`, cacheKey);
         
-        if (nativeContent) {
+        if (cached?.status === 'done' && cached.srt_content) {
           const dataUri = 'data:text/plain;charset=utf-8;base64,' + 
-            Buffer.from(nativeContent).toString('base64');
+            Buffer.from(cached.srt_content).toString('base64');
           subtitles.push({
-            id: `native-${toLang}`,
+            id: `translated-${toLang}`,
             lang: toLang,
             url: dataUri
           });
-          continue;
-        }
-      } catch (error) {
-        console.warn(`Native subtitle search failed for ${toLang}:`, error.message);
-      }
-      
-      // Start translation if not cached
-      if (!cached || cached.status === 'error' || cached.progress < 100) {
-        try {
-          const englishContent = await searchAndCacheOpenSubtitles(imdb_id, season, episode, 'en');
-          if (englishContent) {
-            // Start background translation
-            progressiveTranslate(cacheKey, englishContent, toLang, ENGINE)
-              .catch(err => console.error('Background translation failed:', err));
-            
-            // Return processing status
-            subtitles.push({
-              id: `processing-${toLang}`,
-              lang: toLang,
-              url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(
-                `1\n00:00:00,000 --> 00:00:30,000\n🔄 Translating to ${toLang}... Please refresh in 30-60 seconds.\n`
-              ).toString('base64')
-            });
-          }
-        } catch (error) {
-          console.error(`Translation initiation failed for ${toLang}:`, error.message);
+        } else {
+          progressiveTranslate(cacheKey, englishContent, toLang, ENGINE)
+            .catch(err => console.error('Background translation failed:', err));
+          
+          subtitles.push({
+            id: `processing-${toLang}`,
+            lang: toLang,
+            url: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(
+              `1\n00:00:00,000 --> 00:00:30,000\n🔄 Translating to ${toLang}... Please refresh in 30-60 seconds.\n`
+            ).toString('base64')
+          });
         }
       }
+    } else {
+      console.log('No English subtitles found in Stremio\'s own list.');
     }
     
     return { subtitles };
@@ -476,23 +277,29 @@ const handleSubtitles = async ({ id, extra = {} }) => {
   }
 };
 
+const builder = new addonBuilder({
+  "id": "org.custom.subtranslate.v3",
+  "version": "3.0.0",
+  "name": "AI Subtitle Translator (Direct)",
+  "description": "Smart subtitle translation that directly uses Stremio's built-in subtitle sources.",
+  "resources": ["subtitles"],
+  "types": ["movie", "series"],
+  "idPrefixes": ["tt"],
+  "behaviorHints": { "configurable": true, "configurationRequired": false },
+  "config": DEFAULT_TO_LANGS.map(lang => ({
+    "key": `translate_${lang}`,
+    "type": "boolean",
+    "title": `Translate to ${lang}`,
+    "default": lang === DEFAULT_TO_LANGS[0]
+  })),
+  "catalogs": []
+});
+
 builder.defineSubtitlesHandler(handleSubtitles);
 
-// Routes
 app.get('/', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`
-    <h2>🎬 AI Subtitle Translator v2.0</h2>
-    <p><strong>Manifest URL:</strong> <code>${BASE_URL}/manifest.json</code></p>
-    <p><strong>Features:</strong></p>
-    <ul>
-      <li>✅ OpenSubtitles native language priority</li>
-      <li>✅ Smart caching system</li>
-      <li>✅ Multi-language support: ${DEFAULT_TO_LANGS.join(', ')}</li>
-      <li>✅ Progressive translation</li>
-    </ul>
-    <p><strong>Status:</strong> <a href="/status">View cache status</a></p>
-  `);
+  res.end(`...`);
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -506,14 +313,12 @@ app.get('/status', async (req, res) => {
       FROM translation_cache 
       GROUP BY status
     `);
-    
     const recent = await db.all(`
       SELECT key, to_lang, status, created_at
       FROM translation_cache 
       ORDER BY created_at DESC 
       LIMIT 20
     `);
-    
     res.json({ stats, recent });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -522,48 +327,29 @@ app.get('/status', async (req, res) => {
 
 app.get('/health', async (req, res) => {
   try {
-    console.log('Health check requested');
-    
-    // Test database connection
     await db.get('SELECT 1');
-    
     const health = { 
       status: 'ok', 
-      version: '2.0.0',
+      version: '3.0.0',
       timestamp: Date.now(),
       port: PORT,
       base_url: BASE_URL,
       database: 'connected',
-      opensubtitles_configured: !!OPENSUBTITLES_API_KEY,
       google_configured: !!GOOGLE_API_KEY,
       deepl_configured: !!DEEPL_API_KEY,
       environment: process.env.NODE_ENV || 'development'
     };
-    
-    console.log('Health check passed:', health);
     res.json(health);
   } catch (error) {
-    console.error('Health check failed:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      error: error.message,
-      timestamp: Date.now()
-    });
+    res.status(500).json({ status: 'error', error: error.message });
   }
 });
 
 console.log('✅ Routes configured');
 
-// Start server with Railway compatibility
-console.log('🔄 Starting server...');
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Subtitle Translator v2.0 running on port ${PORT}`);
+  console.log(`🚀 Subtitle Translator v3.0 running on port ${PORT}`);
   console.log(`📋 Manifest: ${BASE_URL}/manifest.json`);
-  console.log(`🔧 Supported languages: ${DEFAULT_TO_LANGS.join(', ')}`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Server bound to: 0.0.0.0:${PORT}`);
-  console.log(`📊 Railway PORT env: ${process.env.PORT}`);
-  console.log(`🌍 Railway URL env: ${process.env.RAILWAY_STATIC_URL}`);
 });
 
 server.on('error', (error) => {
@@ -571,18 +357,10 @@ server.on('error', (error) => {
   process.exit(1);
 });
 
-console.log('🎉 Server started successfully!');
-
-// Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully...');
   server.close(() => {
-    console.log('Server closed');
     if (db) {
-      db.close().then(() => {
-        console.log('Database closed');
-        process.exit(0);
-      });
+      db.close().then(() => { process.exit(0); });
     } else {
       process.exit(0);
     }
