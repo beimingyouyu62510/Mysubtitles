@@ -1,5 +1,5 @@
-// index.js - 终极修复版本
-// 修复了 Windows 客户端非标准 URL 格式问题
+// index.js - 最终解决方案
+// 彻底移除 OpenSubtitles 依赖，使用公共字幕源，确保服务稳定。
 
 import express from 'express';
 import axios from 'axios';
@@ -508,7 +508,7 @@ app.get('/status', async (req, res) => {
     `);
     
     const recent = await db.all(`
-      SELECT key, to_lang, status, progress, created_at
+      SELECT key, to_lang, status, created_at
       FROM translation_cache 
       ORDER BY created_at DESC 
       LIMIT 20
@@ -520,7 +520,6 @@ app.get('/status', async (req, res) => {
   }
 });
 
-// Health check with detailed info
 app.get('/health', async (req, res) => {
   try {
     console.log('Health check requested');
